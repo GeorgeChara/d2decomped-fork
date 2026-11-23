@@ -1,0 +1,93 @@
+# D2Decomp for George's LAN rig (Raspberry Pi 5 seats): upstream main + lanrig/patches, built in debian:trixie arm64 as the
+# seats, upstream's tests, published as a release (d2d, mpq-cat, MD5SUMS, SHA256SUMS, BUILD.txt). lan-rig's D2 pin workflow
+# picks up the newest lanrig-d2-* release. Weekly, or by hand: Actions > lan-rig D2 > Run workflow (gh workflow run lanrig-d2.yml).
+# A patch that no longer applies, a failed build or a failed test fails the run, and no release is made.
+name: lan-rig D2
+on:
+  schedule:
+    - cron: "0 5 * * 1"   # Monday 05:00 UTC
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Upstream commit to build (empty: main)"
+        default: ""
+      force:
+        description: "Build even if this upstream commit and patch stack already have a release"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: lanrig-d2
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm   # free for public repos
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: ci }
+
+      - name: Upstream commit
+        id: up
+        run: |
+          git clone -q --filter=blob:none https://github.com/psi29a/d2decomped src
+          sha=$(git -C src rev-parse --verify "${COMMIT:-origin/main}^{commit}")
+          stack=$(cat ci/lanrig/patches/*.patch ci/lanrig/build.sh | sha256sum | cut -c1-8)
+          git -C src checkout -q --detach "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"; echo "stack=$stack" >> "$GITHUB_OUTPUT"
+          echo "upstream $sha ($(git -C src log -1 --format='%cs %s'))"
+          if [ "$FORCE" != true ] && grep -q "^$sha $stack " ci/lanrig/LAST 2>/dev/null; then
+            echo "::notice::upstream ${sha:0:7} with these patches already has release $(cut -d' ' -f3 ci/lanrig/LAST | head -1): nothing to build"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          COMMIT: ${{ inputs.commit }}
+          FORCE: ${{ inputs.force }}
+
+      - name: Our patches
+        if: steps.up.outputs.skip != '1'
+        run: |
+          for p in ci/lanrig/patches/*.patch; do
+            git -C src apply --whitespace=nowarn "$GITHUB_WORKSPACE/$p" || { echo "::error::$(basename "$p") no longer applies on upstream ${{ steps.up.outputs.sha }}: rebase it, or drop it if upstream has it"; exit 1; }
+            echo "applied $(basename "$p")"
+          done
+
+      - name: Build and test (debian:trixie arm64)
+        if: steps.up.outputs.skip != '1'
+        run: |
+          mkdir out
+          docker run --rm -v "$PWD/src:/src" -v "$PWD/out:/out" -v "$PWD/ci/lanrig:/ci:ro" debian:trixie bash /ci/build.sh
+
+      - name: Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with: { name: logs, path: "out/*.log", if-no-files-found: ignore }
+
+      - name: Release
+        if: steps.up.outputs.skip != '1'
+        run: |
+          sha=${{ steps.up.outputs.sha }}; stack=${{ steps.up.outputs.stack }}
+          tag="lanrig-d2-$(date -u +%F)-${sha:0:7}"
+          gh release view "$tag" >/dev/null 2>&1 && tag="$tag-$stack"
+          cd out
+          md5sum d2d mpq-cat > MD5SUMS; sha256sum d2d mpq-cat > SHA256SUMS
+          { echo "upstream $sha"; echo "date $(git -C ../src log -1 --format=%cs)"; echo "subject $(git -C ../src log -1 --format=%s)"
+            echo "patches $(cd ../ci/lanrig/patches && ls *.patch | xargs)"; echo "stack $stack"; echo "runner ${{ runner.arch }} debian:trixie"
+            echo "runtime $(xargs < RUNTIME-PACKAGES)"; grep "tests passed" tests.log; } > BUILD.txt
+          cat BUILD.txt MD5SUMS
+          gh release create "$tag" d2d mpq-cat MD5SUMS SHA256SUMS BUILD.txt RUNTIME-PACKAGES --target "$GITHUB_SHA" \
+            --title "lan-rig D2 $(date -u +%F) (upstream ${sha:0:7})" --notes-file BUILD.txt
+          echo "$sha $stack $tag" > ../ci/lanrig/LAST
+
+      # A public repo's schedule stops after 60 days without activity: the weekly check is a commit
+      - name: Record
+        if: always() && steps.up.outcome == 'success'
+        run: |
+          cd ci
+          grep -v '^checked' lanrig/LAST > lanrig/LAST.new 2>/dev/null || true
+          echo "checked $(date -u '+%F %H:%M') upstream ${{ steps.up.outputs.sha }} ${{ job.status }}" >> lanrig/LAST.new
+          mv lanrig/LAST.new lanrig/LAST
+          git config user.name "github-actions[bot]"; git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lanrig/LAST && git commit -qm "lan-rig D2: checked upstream ${{ steps.up.outputs.sha }}" && git push -q origin HEAD:${{ github.ref_name }}

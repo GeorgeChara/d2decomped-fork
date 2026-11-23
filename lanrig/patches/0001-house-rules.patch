@@ -1,0 +1,278 @@
+From 4b551497d6ae5ee66b202e63ac0b934fe0e2020c Mon Sep 17 00:00:00 2001
+From: George <george@charalambous.uk>
+Date: Mon, 23 Nov 2026 11:15:10 +0000
+Subject: [PATCH 1/2] lan-rig: house rules (d2d --rules, debug rules): players,
+ exp, gold, magic find
+
+---
+ apps/d2d/devctl/debug_fight.cpp  |  7 ++++
+ apps/d2d/main.cpp                | 10 ++++++
+ components/game/fight/deaths.cpp |  6 ++--
+ components/game/loot.hpp         |  4 ++-
+ components/rules/drops.cpp       |  3 ++
+ components/rules/house.hpp       | 59 ++++++++++++++++++++++++++++++++
+ components/rules/monsters.cpp    |  2 ++
+ tests/test_house.cpp             | 31 +++++++++++++++++
+ 8 files changed, 119 insertions(+), 3 deletions(-)
+ create mode 100644 components/rules/house.hpp
+ create mode 100644 tests/test_house.cpp
+
+diff --git a/apps/d2d/devctl/debug_fight.cpp b/apps/d2d/devctl/debug_fight.cpp
+index fddd1b90..b0d96400 100644
+--- a/apps/d2d/devctl/debug_fight.cpp
++++ b/apps/d2d/devctl/debug_fight.cpp
+@@ -5,6 +5,7 @@
+ #include "debug.hpp"
+ 
+ #include <d2s_items.hpp>
++#include <house.hpp>
+ #include <uniques.hpp>
+ 
+ #include <algorithm>
+@@ -117,6 +118,12 @@ void DebugVerbs::add_fight() {
+                                }());
+         return out + "ok\n";
+     });
++    add("rules", [](const Args& args) -> Reply {   // the house rules; rules <key> <value>: change one (players, exp, gold, magic find)
++        std::string line, error;
++        for (std::size_t i = 2; i < args.size(); ++i) line += args[i] + " ";
++        if (!d2d::rules::read_house(line, d2d::rules::house(), error)) return std::format("err {}\n", error);
++        return std::format("ok {}\n", d2d::rules::describe(d2d::rules::house()));
++    });
+     add("quest", [this](const Args& args) -> Reply {   // mark Act quest <q> done (bit 0), active difficulty
+         if (args.size() < 3) return std::nullopt;
+         const int quest = std::atoi(args[2].c_str()), bit = quest * 16;
+diff --git a/apps/d2d/main.cpp b/apps/d2d/main.cpp
+index d8452e98..9c5e06fc 100644
+--- a/apps/d2d/main.cpp
++++ b/apps/d2d/main.cpp
+@@ -47,6 +47,7 @@
+ #include <d2s_items.hpp>
+ #include <d2s_write.hpp>
+ #include <devctl.hpp>
++#include <house.hpp>
+ #include <install.hpp>
+ #include <join.hpp>
+ #include <lan.hpp>
+@@ -2232,6 +2233,8 @@ int main(int argc, char** argv) {
+     app.add_option("--connect", lan_connect, "Join a d2d game hosted with --host at this address (your LAN)");
+     app.add_option("--host", lan_host_port, "Host this game for d2d players on your LAN, on this port (6113 is the usual)")->check(CLI::Range(1, 65535));
+     app.add_option("--game-exe", game_exe, "Your 1.14d game.exe, for --join (else $D2_GAME_EXE, game.exe or bin/game.exe beside the MPQs)");
++    std::string house_rules;
++    app.add_option("--rules", house_rules, "House rules for the games this d2d runs (host or alone): a file of players / exp / gold / magic find lines")->check(CLI::ExistingFile);
+     int start_cam_x = -1, start_cam_y = -1;
+     app.add_option("--start-cam-x", start_cam_x,
+                    "InGame camera x (grid cell)");
+@@ -2391,6 +2394,13 @@ int main(int argc, char** argv) {
+     g_start_hardcore = start_hardcore;
+     g_start_classic  = start_classic;
+     g_no_save        = no_save;
++    if (!house_rules.empty()) {
++        std::ifstream file(house_rules);
++        const std::string text{ std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
++        std::string error;
++        if (!d2d::rules::read_house(text, d2d::rules::house(), error)) { d2d::log::error("--rules {}: {}", house_rules, error); return 2; }
++        d2d::log::info("house rules ({}): {}", house_rules, d2d::rules::describe(d2d::rules::house()));
++    }
+     if (cfg["touch_controls"] == "1") g_touch_controls = true;
+     else if (cfg["touch_controls"] == "0" && touch_flag->count() == 0) g_touch_controls = false;
+     g_start_cam_x    = start_cam_x;
+diff --git a/components/game/fight/deaths.cpp b/components/game/fight/deaths.cpp
+index 58cbde15..6f4c5318 100644
+--- a/components/game/fight/deaths.cpp
++++ b/components/game/fight/deaths.cpp
+@@ -12,6 +12,7 @@
+ #include <combat.hpp>
+ #include <d2s.hpp>
+ #include <d2s_items.hpp>
++#include <house.hpp>
+ #include <merc.hpp>
+ #include <missiles.hpp>
+ #include <monsters.hpp>
+@@ -496,8 +497,9 @@ auto Fight::drop_counts() -> std::pair<int, int> {
+ 
+ auto Fight::gain_exp(std::int64_t share, const Monster& monster, std::uint32_t now_ms) -> void {
+         const auto save_class = std::size_t(std::max(actor->character.character_class, 0));
+-        const auto exp = d2d::rules::kill_award(int(std::min<std::int64_t>(share, 0x7fffffff)), int(actor->character.stats.get(d2d::d2s::kLevel)), monster.stats.level,
+-                                                int(actor->psum[d2d::d2s::kAddExperience]), game_data->exp_ratio, game_data->exp_ratio_shift, game_data->max_level);   // item_addexperience: the experience shrine
++        auto exp = d2d::rules::kill_award(int(std::min<std::int64_t>(share, 0x7fffffff)), int(actor->character.stats.get(d2d::d2s::kLevel)), monster.stats.level,
++                                          int(actor->psum[d2d::d2s::kAddExperience]), game_data->exp_ratio, game_data->exp_ratio_shift, game_data->max_level);   // item_addexperience: the experience shrine
++        exp = exp * d2d::rules::house().exp_pct / 100;   // house rules
+         const int levels_gained = d2d::rules::gain_exp(actor->character.stats, exp, game_data->exp_next, game_data->class_gains[save_class]);
+         d2d::log::info("{} killed {} (+{} exp){}", actor->character.name, monster.npc.name, exp, levels_gained ? std::format(", level {}", actor->character.stats.get(d2d::d2s::kLevel)) : "");
+         if (levels_gained) {
+diff --git a/components/game/loot.hpp b/components/game/loot.hpp
+index 9f4be762..d6aef573 100644
+--- a/components/game/loot.hpp
++++ b/components/game/loot.hpp
+@@ -14,6 +14,7 @@
+ 
+ #include <d2s_items.hpp>
+ #include <drops.hpp>
++#include <house.hpp>
+ #include <monster_ids.hpp>
+ #include <replenish.hpp>
+ #include <rules.hpp>
+@@ -118,6 +119,7 @@ struct Loot {
+             if (prop.stat == d2d::d2s::kGoldFind) gold_find += prop.value;
+         }
+         if (now_ms < blessed_until) magic_find += blessed_find;   // the wisps' dance (Fight::wisp_blessing)
++        magic_find += d2d::rules::house().magic_find;               // house rules
+         constexpr int kMost = 6;
+         std::vector<d2d::rules::Drop> drops;
+         // FUN_0055a6d0 counts the drop before FUN_005589a0 (0x55af4c): the
+@@ -155,7 +157,7 @@ struct Loot {
+                 ground_item.item.code = "gld";
+                 d2d::rules::Rng unit_seed{ game_seed.next() };
+                 game_seed.next();
+-                ground_item.gold = dropped.gold ? dropped.gold : d2d::rules::gold_amount(ilvl, dropped.mul, unit_seed) * (100 + gold_find) / 100;
++                ground_item.gold = dropped.gold ? dropped.gold : int(std::int64_t(d2d::rules::gold_amount(ilvl, dropped.mul, unit_seed)) * (100 + gold_find) / 100 * d2d::rules::house().gold_pct / 100);
+                 ground_item.label = std::to_string(ground_item.gold) + " Gold";
+             } else {
+                 d2d::rules::Rng unit_seed{ game_seed.next() }, item_seed{ game_seed.next() };
+diff --git a/components/rules/drops.cpp b/components/rules/drops.cpp
+index 2c86a4ee..9a6a71ef 100644
+--- a/components/rules/drops.cpp
++++ b/components/rules/drops.cpp
+@@ -2,6 +2,7 @@
+ // The bodies of drops.hpp's functions, with the research behind each.
+ #include "drops.hpp"
+ 
++#include "house.hpp"
+ #include "replenish.hpp"
+ #include "rules.hpp"
+ 
+@@ -227,6 +228,8 @@ void roll_drops(const Tables& tables, const std::string& treasure_class, int ilv
+     const auto found = tables.treasure.find(treasure_class);
+     if (found == tables.treasure.end()) return;
+     int count = 0;
++    players = std::max(players, house().players);   // house rules: players n
++    if (dropper_players > 0) dropper_players = std::max(dropper_players, house().players);
+     int rolls_for = nearby + (players - nearby) / 2;
+     if (dropper_players > 0) rolls_for = std::min(rolls_for, dropper_players);
+     detail::roll_class(tables, found->second, {}, ilvl, rng, out, count, max, rolls_for, magic_find, 0, forced, place);
+diff --git a/components/rules/house.hpp b/components/rules/house.hpp
+new file mode 100644
+index 00000000..aa5b5df3
+--- /dev/null
++++ b/components/rules/house.hpp
+@@ -0,0 +1,59 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// House rules: a LAN host's switches for its game (d2d --rules <file>), not
++// game.exe's. One setting a line, # starts a comment:
++//   players 8        monsters as for 8 players (life, exp, drops), as /players 8
++//   exp 3            times the experience
++//   gold 3           times the gold dropped
++//   magic find 100   extra magic find for everyone, in %
++// The defaults change nothing.
++#pragma once
++
++#include <algorithm>
++#include <cmath>
++#include <format>
++#include <sstream>
++#include <string>
++
++namespace d2d::rules {
++
++struct House {
++    int players = 1;          // at least this many, as /players n (1..8)
++    int exp_pct = 100;
++    int gold_pct = 100;
++    int magic_find = 0;
++};
++
++inline House& house() {
++    static House rules;
++    return rules;
++}
++
++// Reads a rules file's text over `out` (unset keys keep their value); a
++// line it can't read is an error naming it, and `out` is left alone.
++inline bool read_house(const std::string& text, House& out, std::string& error) {
++    House rules = out;
++    std::istringstream lines(text);
++    std::string line;
++    for (int number = 1; std::getline(lines, line); ++number) {
++        line = line.substr(0, line.find('#'));
++        std::istringstream words(line);
++        std::string key, second;
++        double value = 0;
++        if (!(words >> key)) continue;
++        if (key == "magic" && words >> second && second == "find") key = "magic find";
++        if (!(words >> value) || value < 0) { error = std::format("line {}: {} wants a number", number, key); return false; }
++        if (key == "players") rules.players = std::clamp(int(value), 1, 8);
++        else if (key == "exp") rules.exp_pct = int(std::lround(value * 100));
++        else if (key == "gold") rules.gold_pct = int(std::lround(value * 100));
++        else if (key == "magic find") rules.magic_find = int(value);
++        else { error = std::format("line {}: don't know '{}' (players, exp, gold, magic find)", number, key); return false; }
++    }
++    out = rules;
++    return true;
++}
++
++inline std::string describe(const House& rules) {
++    return std::format("players {}, exp x{:g}, gold x{:g}, magic find +{}%", rules.players, rules.exp_pct / 100.0, rules.gold_pct / 100.0, rules.magic_find);
++}
++
++}  // namespace d2d::rules
+diff --git a/components/rules/monsters.cpp b/components/rules/monsters.cpp
+index 903bd239..958f6e2e 100644
+--- a/components/rules/monsters.cpp
++++ b/components/rules/monsters.cpp
+@@ -3,6 +3,7 @@
+ #include "monsters.hpp"
+ 
+ #include "combat.hpp"
++#include "house.hpp"
+ #include "montypes.hpp"
+ #include "rules.hpp"
+ 
+@@ -219,6 +220,7 @@ int start_level(const MonType& type_info, int difficulty_index, int area_level)
+ MonStats monster_stats(const Monsters& monsters, int type, int difficulty, Rng& rng, int level_add, int players, int area_level) {
+     MonStats stats;
+     if (type < 0 || std::size_t(type) >= monsters.types.size()) return stats;
++    players = std::max(players, house().players);   // house rules: players n
+     const auto& type_info = monsters.types[std::size_t(type)];
+     stats.prime_evil = type_info.prime_evil;
+     if (type_info.align != 0) players = 1;
+diff --git a/tests/test_house.cpp b/tests/test_house.cpp
+new file mode 100644
+index 00000000..2060c7e2
+--- /dev/null
++++ b/tests/test_house.cpp
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// test-links: rules
++// House rules files (d2d --rules): the keys, comments, a bad line leaving
++// the rules alone, and a change over the rules already set (debug rules).
++#include <house.hpp>
++
++#include <cassert>
++#include <cstdio>
++#include <string>
++
++using namespace d2d::rules;
++
++int main() {
++    House rules;
++    std::string error;
++    assert(read_house("# Quick Start night\nplayers 8\nexp 3   # times\ngold 1.5\nmagic find 100\n", rules, error));
++    assert(rules.players == 8 && rules.exp_pct == 300 && rules.gold_pct == 150 && rules.magic_find == 100);
++    assert(describe(rules) == "players 8, exp x3, gold x1.5, magic find +100%");
++
++    assert(read_house("players 20", rules, error) && rules.players == 8);   // /players stops at 8
++    assert(read_house("exp 2", rules, error) && rules.exp_pct == 200 && rules.gold_pct == 150);   // the rest stay
++
++    const House before = rules;
++    assert(!read_house("exp 4\nspeed 2\n", rules, error));
++    assert(error.find("line 2") != std::string::npos && rules.exp_pct == before.exp_pct);
++    assert(!read_house("players lots", rules, error));
++
++    House none;
++    assert(read_house("", none, error) && none.players == 1 && none.exp_pct == 100);
++    std::puts("house: ok");
++}
+-- 
+2.39.5 (Apple Git-154)
+

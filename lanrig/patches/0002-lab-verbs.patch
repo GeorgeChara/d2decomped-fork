@@ -1,0 +1,71 @@
+From 7725b69b5518f9a77d3a62db46f1a6c698467114 Mon Sep 17 00:00:00 2001
+From: George <george@charalambous.uk>
+Date: Mon, 23 Nov 2026 11:15:10 +0000
+Subject: [PATCH 2/2] lan-rig: build lab verbs: debug levelto, give with item
+ level and unique / set row
+
+---
+ apps/d2d/devctl/debug.cpp      |  2 +-
+ apps/d2d/devctl/debug_hero.cpp | 18 ++++++++++++++++--
+ 2 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/apps/d2d/devctl/debug.cpp b/apps/d2d/devctl/debug.cpp
+index 381dfac6..e07f327c 100644
+--- a/apps/d2d/devctl/debug.cpp
++++ b/apps/d2d/devctl/debug.cpp
+@@ -32,7 +32,7 @@ std::string DebugVerbs::run(const Args& args) const {
+             if (auto reply = verb->second(args)) return *std::move(reply);
+         }
+     }
+-    return "err debug collision|automap|portals|objects|net|statpts <n>|skillpts <n>|wear|unid|level|blocked <x> <y>|warp <x> <y>|stat <id> <v>|quest <q>|skill left|right <id>|points <id> <n>\n";
++    return "err debug collision|automap|portals|objects|net|statpts <n>|skillpts <n>|wear|unid|level|blocked <x> <y>|warp <x> <y>|stat <id> <v>|levelto <n>|quest <q>|skill left|right <id>|points <id> <n>\n";
+ }
+ 
+ }  // namespace d2d::client
+diff --git a/apps/d2d/devctl/debug_hero.cpp b/apps/d2d/devctl/debug_hero.cpp
+index 6d74c308..8ee8cbf5 100644
+--- a/apps/d2d/devctl/debug_hero.cpp
++++ b/apps/d2d/devctl/debug_hero.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include "skilltree.hpp"
+ 
++#include <character.hpp>
+ #include <d2s_items.hpp>
+ #include <rules.hpp>
+ #include <skills.hpp>
+@@ -42,9 +43,10 @@ void DebugVerbs::add_hero() {
+         items.push_back(item);
+         return std::format("ok quantity={}\n", item.quantity);
+     });
+-    add("give", [this](const Args& args) -> Reply {   // an item <code> [quality] at the player's feet, the area level's
++    add("give", [this](const Args& args) -> Reply {   // an item <code> [quality] [ilvl, 30] [UniqueItems / SetItems row] at the player's feet
+         if (args.size() < 3) return std::nullopt;
+-        session.world.loot.put({ .code = args[2], .quality = args.size() >= 4 ? std::atoi(args[3].c_str()) : 2 }, session.hero.player.x, session.hero.player.y, 30,
++        const auto arg = [&](std::size_t index, int fallback) { return args.size() > index ? std::atoi(args[index].c_str()) : fallback; };
++        session.world.loot.put({ .code = args[2], .quality = arg(3, 2), .special = arg(5, -1) + 1 }, session.hero.player.x, session.hero.player.y, std::clamp(arg(4, 30), 1, 99),
+                             session.world.fight.spawning.game, session.world.now);
+         return std::format("ok #{}\n", session.world.loot.ground.back().id);
+     });
+@@ -63,6 +65,18 @@ void DebugVerbs::add_hero() {
+         } else return std::string("err not in the inventory panel\n");
+         return std::format("ok {} {}\n", rect[0] + rect[2] / 2, rect[1] + rect[3] / 2);
+     });
++    add("levelto", [this](const Args& args) -> Reply {   // earn the experience for level <n>, levelling as kills would (points, life, mana)
++        if (args.size() < 3 || !session.world.game_data) return std::nullopt;
++        const auto& data = *session.world.game_data;
++        auto& character = session.hero.character;
++        const auto target = std::size_t(std::clamp(std::atoi(args[2].c_str()), 1, 99));
++        if (target < 2 || target - 1 >= data.exp_next.size()) return std::string("err level 2..99\n");
++        const auto need = data.exp_next[target - 1] - character.stats.values[d2d::d2s::kExp];
++        if (need <= 0) return std::string("err already there\n");
++        const auto gained = d2d::rules::gain_exp(character.stats, need, data.exp_next, data.class_gains[std::size_t(std::max(character.character_class, 0))]);
++        character.panel = d2d::game::panel_stats(data, character.header, character.items, character.stats);
++        return std::format("ok +{} levels\n", gained);
++    });
+     add("passives", [this](const Args& /*args*/) -> Reply {   // the passives' stats: stat=value[/itype]
+         if (!scene) return std::nullopt;
+         std::string out = "ok";
+-- 
+2.39.5 (Apple Git-154)
+
