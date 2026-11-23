@@ -70,14 +70,14 @@ jobs:
         run: |
           sha=${{ steps.up.outputs.sha }}; stack=${{ steps.up.outputs.stack }}
           tag="lanrig-d2-$(date -u +%F)-${sha:0:7}"
-          gh release view "$tag" >/dev/null 2>&1 && tag="$tag-$stack"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 && tag="$tag-$stack"
           cd out
           md5sum d2d mpq-cat > MD5SUMS; sha256sum d2d mpq-cat > SHA256SUMS
           { echo "upstream $sha"; echo "date $(git -C ../src log -1 --format=%cs)"; echo "subject $(git -C ../src log -1 --format=%s)"
             echo "patches $(cd ../ci/lanrig/patches && ls *.patch | xargs)"; echo "stack $stack"; echo "runner ${{ runner.arch }} debian:trixie"
             echo "runtime $(xargs < RUNTIME-PACKAGES)"; grep "tests passed" tests.log; } > BUILD.txt
           cat BUILD.txt MD5SUMS
-          gh release create "$tag" d2d mpq-cat MD5SUMS SHA256SUMS BUILD.txt RUNTIME-PACKAGES --target "$GITHUB_SHA" \
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" d2d mpq-cat MD5SUMS SHA256SUMS BUILD.txt RUNTIME-PACKAGES --target "$GITHUB_SHA" \
             --title "lan-rig D2 $(date -u +%F) (upstream ${sha:0:7})" --notes-file BUILD.txt
           echo "$sha $stack $tag" > ../ci/lanrig/LAST
 
